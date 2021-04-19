@@ -302,11 +302,11 @@ class DLA(nn.Module):
             inplanes = planes
         return nn.Sequential(*modules)
 
-    def forward(self, x, pre_img=None, pre_hm=None):
+    def forward(self, x, pre_hm=None):
         y = []
         x = self.base_layer(x)
-        if pre_img is not None:
-            x = x + self.pre_img_layer(pre_img)
+        # if pre_img is not None:
+        #     x = x + self.pre_img_layer(pre_img)
         if pre_hm is not None:
             x = x + self.pre_hm_layer(pre_hm)
         for i in range(6):
@@ -629,12 +629,18 @@ class DLASeg(BaseModel):
         return [y[-1]]
 
     def imgpre2feats(self, x, pre_img=None, pre_hm=None):
-        x = self.base(x, pre_img, pre_hm)
-        x = self.dla_up(x)
+        x_1 = self.base(x, pre_hm)
+        x_1 = self.dla_up(x_1)
 
-        y = []
+        x_2 = self.base(pre_img, pre_hm)
+        x_2 = self.dla_up(x_2)
+
+        y_1 = []
+        y_2 = []
         for i in range(self.last_level - self.first_level):
-            y.append(x[i].clone())
-        self.ida_up(y, 0, len(y))
+            y_1.append(x_1[i].clone())
+            y_2.append(x_2[i].clone())
+        self.ida_up(y_1, 0, len(y_1))
+        self.ida_up(y_2, 0, len(y_2))
 
-        return [y[-1]]
+        return [y_1[-1]], [y_2[-1]]
