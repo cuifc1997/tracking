@@ -118,7 +118,7 @@ class opts(object):
                              help='learning rate for batch size 32.')
     self.parser.add_argument('--lr_step', type=str, default='60',
                              help='drop learning rate by 10.')
-    self.parser.add_argument('--save_point', type=str, default='90',
+    self.parser.add_argument('--save_point', type=str, default='20,25,30,35,40,45,50,55,60,65,70',
                              help='when to save the model to disk.')
     self.parser.add_argument('--num_epochs', type=int, default=70,
                              help='total training epochs.')

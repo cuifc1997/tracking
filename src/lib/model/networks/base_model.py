@@ -30,7 +30,7 @@ class BaseModel(nn.Module):
 		# TODO: ADD SOMETHING
 		self.maxpool = nn.MaxPool2d(kernel_size=4, stride=4, padding=1)
 		self.shift = nn.Sequential(
-			DCN(128, 64, kernel_size=(3, 3), stride=1, padding=1,  dilation=1, deformable_groups=64),
+			DCN(128, 64, kernel_size=(3, 3), stride=1, padding=1, dilation=1, deformable_groups=1),
 			nn.BatchNorm2d(64),
 			nn.ReLU(inplace=True)
 		)
