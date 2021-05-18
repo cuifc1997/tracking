@@ -106,7 +106,7 @@ class GenericDataset(data.Dataset):
             if flipped:
                 pre_image = pre_image[:, ::-1, :].copy()
                 pre_anns = self._flip_anns(pre_anns, width)
-            if opt.same_aug_pre and frame_dist != 0:
+            if (opt.same_aug_pre and frame_dist != 0) or self.split != 'train':
                 trans_input_pre = trans_input
                 trans_output_pre = trans_output
             else:
@@ -121,6 +121,12 @@ class GenericDataset(data.Dataset):
             pre_hm, pre_cts, track_ids = self._get_pre_dets(
                 pre_anns, trans_input_pre, trans_output_pre)
             ret['pre_img'] = pre_img
+            ret['input_pre_ind'] = np.zeros((self.max_objs), dtype=np.int64)
+            ret['pre_cts_int'] = np.zeros((self.max_objs, 2), dtype=np.int32)
+            for i in range(min(len(pre_cts), self.max_objs)):
+                pre_ct = pre_cts[i]
+                pre_ct = pre_ct.astype(np.int32)
+                ret['input_pre_ind'][i] = pre_ct[1] * self.opt.output_w + pre_ct[0]
             if opt.pre_hm:
                 ret['pre_hm'] = pre_hm
 
@@ -335,6 +341,9 @@ class GenericDataset(data.Dataset):
         ret['ind'] = np.zeros((max_objs), dtype=np.int64)
         ret['cat'] = np.zeros((max_objs), dtype=np.int64)
         ret['mask'] = np.zeros((max_objs), dtype=np.float32)
+        ret['cts_int'] = np.zeros((max_objs, 2), dtype=np.int64)
+        ret['ind_pre'] = np.zeros((max_objs), dtype=np.int64)
+
 
         regression_head_dims = {
             'reg': 2, 'wh': 2, 'tracking': 2, 'ltrb': 4, 'ltrb_amodal': 4,
@@ -436,7 +445,9 @@ class GenericDataset(data.Dataset):
         if 'wh' in ret:
             ret['wh'][k] = 1. * w, 1. * h
             ret['wh_mask'][k] = 1
+        # cur_det index
         ret['ind'][k] = ct_int[1] * self.opt.output_w + ct_int[0]
+        ret['cts_int'][k] = ct_int
         ret['reg'][k] = ct - ct_int
         ret['reg_mask'][k] = 1
         draw_umich_gaussian(ret['hm'][cls_id - 1], ct_int, radius)
@@ -453,6 +464,9 @@ class GenericDataset(data.Dataset):
                 pre_ct = pre_cts[track_ids.index(ann['track_id'])]
                 ret['tracking_mask'][k] = 1
                 ret['tracking'][k] = pre_ct - ct_int
+                pre_ct = pre_ct.astype(np.int32)
+                ret['pre_cts_int'][k] = pre_ct
+                ret['ind_pre'][k] = pre_ct[1] * self.opt.output_w + pre_ct[0]
                 gt_det['tracking'].append(ret['tracking'][k])
             else:
                 gt_det['tracking'].append(np.zeros(2, np.float32))

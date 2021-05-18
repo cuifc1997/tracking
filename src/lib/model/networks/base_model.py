@@ -3,18 +3,33 @@ from __future__ import division
 from __future__ import print_function
 
 import torch
+import numpy as np
+from torch.nn import functional as F
 from torch import nn
 try:
     from .DCNv2.dcn_v2 import DCN
 except:
     print('import DCN failed')
     DCN = None
+from .DCNv2.dcn_v2 import DCN_TraDeS
 
 def fill_fc_weights(layers):
 	for m in layers.modules():
 		if isinstance(m, nn.Conv2d):
 			if m.bias is not None:
 				nn.init.constant_(m.bias, 0)
+
+def _gather_feat(feat, ind):
+    dim = feat.size(2)
+    ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
+    feat = feat.gather(1, ind)
+    return feat
+
+def _tranpose_and_gather_feat(feat, ind):
+    feat = feat.permute(0, 2, 3, 1).contiguous()
+    feat = feat.view(feat.size(0), -1, feat.size(3))
+    feat = _gather_feat(feat, ind)
+    return feat
 
 class BaseModel(nn.Module):
 	def __init__(self, heads, head_convs, num_stacks, last_channel, opt=None):
@@ -28,36 +43,40 @@ class BaseModel(nn.Module):
 		self.heads = heads
 
 		# TODO: ADD SOMETHING
-		self.maxpool = nn.MaxPool2d(kernel_size=4, stride=4, padding=1)
+		self.avgpool = nn.AvgPool2d(kernel_size=4, stride=4)
 		self.shift = nn.Sequential(
-			DCN(128, 64, kernel_size=(3, 3), stride=1, padding=1, dilation=1, deformable_groups=1),
-			nn.BatchNorm2d(64),
+			nn.Conv3d(128, 128, kernel_size=(2, 3, 3), stride=(1, 1, 1), padding=(0, 1, 1), groups=128),
+			nn.BatchNorm3d(128),
+			nn.ReLU(inplace=True),
+			nn.Conv3d(128, 64, kernel_size=(1, 3, 3), stride=(1, 1, 1), padding=(0, 1, 1), groups=1),
+			nn.BatchNorm3d(64),
 			nn.ReLU(inplace=True)
 		)
 
-		self.tracking_uv = nn.Sequential(
-			# nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=True),
-			DCN(64, 64, kernel_size=(3, 3), stride=1, padding=1, dilation=1, deformable_groups=1),
+		self.shift_u = nn.Conv2d(64, 9, kernel_size=1, stride=1, padding=0, groups=1)
+		self.tracking_u = nn.Conv2d(9, 1, kernel_size=1, stride=1, padding=0, groups=1)
+		self.shift_v = nn.Conv2d(64, 9, kernel_size=1, stride=1, padding=0, groups=1)
+		self.tracking_v = nn.Conv2d(9, 1, kernel_size=1, stride=1, padding=0, groups=1)
+		self.dcn1_1 = DCN_TraDeS(64, 64, kernel_size=(3, 3), stride=1, padding=1, deformable_groups=1)
+
+		self.re_ID = nn.Sequential(
+			nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=True),
 			nn.BatchNorm2d(64),
 			nn.ReLU(inplace=True),
-			nn.Conv2d(64, 2, kernel_size=1, stride=1, padding=0, bias=True)
+			nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=True),
+			nn.BatchNorm2d(64),
+			nn.ReLU(inplace=True),
+			nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1, bias=True),
+			# nn.BatchNorm2d(128),
+			# nn.ReLU(inplace=True)
 		)
+
 
 		# ATTENTION
-		self.avg_pool = nn.AdaptiveAvgPool2d((1,1))
-		self.max_pool = nn.AdaptiveMaxPool2d((1,1))
-		self.share_layer_1 = nn.Sequential(
-			nn.Linear(64, 16),
-			nn.ReLU(inplace=True),
-			nn.Linear(16, 64),
+		self.attention = nn.Sequential(
+			nn.Conv2d(128, 2, kernel_size=3, stride=1, padding=1, bias=True),
+			nn.BatchNorm2d(2),
 			nn.ReLU(inplace=True)
-		)
-		self.sigmoid = nn.Sigmoid()
-		self.share_layer_2 = nn.Sequential(
-			DCN(5, 5, kernel_size=(3, 3), stride=1, padding=1, dilation=1, deformable_groups=1),
-			nn.ReLU(inplace=True),
-			DCN(5, 1, kernel_size=(3, 3), stride=1, padding=1, dilation=1, deformable_groups=1),
-			nn.Sigmoid()
 		)
 
 		for head in self.heads:
@@ -109,38 +128,40 @@ class BaseModel(nn.Module):
 	def imgpre2feats(self, x, pre_img=None, pre_hm=None):
 		raise NotImplementedError
 
-	def forward(self, x, pre_img=None, pre_hm=None):
+	def forward(self, x, pre_img=None, pre_hm=None, pre_inds=None):
 		if (pre_hm is not None) or (pre_img is not None):
-			feats, pre_feats = self.imgpre2feats(x=x, pre_img=pre_img, pre_hm=pre_hm)
+			feats, pre_feats = self.imgpre2feats(x=x, pre_img=pre_img, pre_hm=None)
 		else:
 			feats = self.img2feats(x)
-
-		feat_1 = feats[0]
-		feat_2 = pre_feats[0]
-
-		pre_hm_pool = self.maxpool(pre_hm)
-		# feat = torch.cat((feat_1, feat_2), dim=2)
-		for i in range(feat_1.shape[1]):
-			if i == 0:
-				feat_shift = torch.cat((feat_1[:, 0, :, :].unsqueeze(1), feat_2[:, 0, :, :].unsqueeze(1)), dim=1)
-			else:
-				layer_feat = torch.cat((feat_1[:, i, :, :].unsqueeze(1), feat_2[:, i, :, :].unsqueeze(1)), dim=1)
-				feat_shift = torch.cat((feat_shift, layer_feat), dim=1)
-
-		feat_shift = self.shift(feat_shift)
-		tracking = self.tracking_uv(feat_shift)
-
-		avg_pool = torch.mean(feat_2, dim=1).unsqueeze(1)
-		max_pool = torch.max(feat_2, dim=1)[0].unsqueeze(1)
-		space_attention = torch.cat((avg_pool, max_pool), dim=1)
-		space_attention = torch.cat((space_attention, tracking), dim=1)
-		space_attention = torch.cat((space_attention, pre_hm_pool), dim=1)
-		space_attention = self.share_layer_2(space_attention)
-		feat_fusion = torch.mul(space_attention, feat_2)
-
-		feat_fusion = feat_fusion + feat_1
-
 		out = []
+
+		cur_feat = feats[0]
+		pre_feat = pre_feats[0]
+
+		cur_reid = self.re_ID(cur_feat)
+		pre_reid = self.re_ID(pre_feat)
+
+		# tracking
+		feat_shift = torch.cat((cur_reid.unsqueeze(2), pre_reid.unsqueeze(2)), dim=2)
+		feat_shift = self.shift(feat_shift)
+		shift_u = self.shift_u(feat_shift.squeeze(2))
+		trackinv_u = self.tracking_u(shift_u)
+		shift_v = self.shift_v(feat_shift.squeeze(2)) # batch_size x 9 x h x w
+		trackinv_v = self.tracking_v(shift_u)
+		tracking = torch.cat((trackinv_u, trackinv_v), dim=1)
+
+		# deformable conv
+		deform_shift = torch.cat((shift_v, shift_u), dim=2).view(tracking.size(0), 9*2, tracking.size(2), tracking.size(3))
+		deform_mask = torch.tensor(np.ones((tracking.shape[0], 9, tracking.shape[2], tracking.shape[3]), dtype=np.float32)).to(self.opt.device)
+		pre_hm_avg = self.avgpool(pre_hm)
+		pre_feat = torch.mul(pre_feat, pre_hm_avg)
+		pre_feat = self.dcn1_1(pre_feat, deform_shift, deform_mask)
+
+		cat_feats = torch.cat((cur_feat, pre_feat), dim=1)
+		attention = self.attention(cat_feats)
+		attention = F.softmax(attention, dim=1)
+		feat_fusion = torch.mul(pre_feat, attention[:, 1, :, :].unsqueeze(1)) + torch.mul(cur_feat, attention[:, 0, :, :].unsqueeze(1))
+
 		feats[0] = feat_fusion
 
 		if self.opt.model_output_list:
@@ -155,7 +176,11 @@ class BaseModel(nn.Module):
 				for head in self.heads:
 					if head == 'tracking':
 						z['tracking'] = tracking
+						# z['attention'] = space_attention
 					else:
 						z[head] = self.__getattr__(head)(feats[s])
+				z['cur_reid'] = cur_reid
+				z['pre_reid'] = pre_reid
 				out.append(z)
 		return out
+

@@ -97,7 +97,7 @@ class Detector(object):
 			if self.opt.tracking:
 				# initialize the first frame
 				if self.pre_images is None:
-					print('Initialize tracking!')
+					# print('Initialize tracking!')
 					self.pre_images = images
 					self.tracker.init_track(
 						meta['pre_dets'] if 'pre_dets' in meta else [])
@@ -106,7 +106,7 @@ class Detector(object):
 					# pre_inds is not used in the current version.
 					# We used pre_inds for learning an offset from previous image to
 					# the current image.
-					pre_hms, pre_inds = self._get_additional_inputs(
+					pre_hms, pre_inds, pre_inds_2 = self._get_additional_inputs(
 						self.tracker.tracks, meta, with_hm=not self.opt.zero_pre_hm)
 
 			pre_process_time = time.time()
@@ -116,7 +116,7 @@ class Detector(object):
 			# output: the output feature maps, only used for visualizing
 			# dets: output tensors after extracting peaks
 			output, dets, forward_time = self.process(
-				images, self.pre_images, pre_hms, pre_inds, return_time=True)
+				images, self.pre_images, pre_hms, pre_inds, pre_inds_2, return_time=True)
 			net_time += forward_time - pre_process_time
 			decode_time = time.time()
 			dec_time += decode_time - forward_time
@@ -285,9 +285,17 @@ class Detector(object):
 			if self.opt.flip_test:
 				input_hm = np.concatenate((input_hm, input_hm[:, :, :, ::-1]), axis=0)
 			input_hm = torch.from_numpy(input_hm).to(self.opt.device)
+
+
+		# add_new_output_inds
+		output_inds_2 = np.zeros((256), dtype=np.int64)
+		for i in range(min(256, len(output_inds))):
+			output_inds_2[i] = output_inds[i]
+		output_inds_2 = torch.from_numpy(output_inds_2).reshape(1, -1).to(self.opt.device)
+
 		output_inds = np.array(output_inds, np.int64).reshape(1, -1)
 		output_inds = torch.from_numpy(output_inds).to(self.opt.device)
-		return input_hm, output_inds
+		return input_hm, output_inds, output_inds_2
 
 
 	def _get_default_calib(self, width, height):
@@ -333,10 +341,10 @@ class Detector(object):
 
 
 	def process(self, images, pre_images=None, pre_hms=None,
-	            pre_inds=None, return_time=False):
+	            pre_inds=None, pre_inds_2=None, return_time=False):
 		with torch.no_grad():
 			torch.cuda.synchronize()
-			output = self.model(images, pre_images, pre_hms)[-1]
+			output = self.model(images, pre_images, pre_hms, pre_inds_2)[-1]
 			output = self._sigmoid_output(output)
 			output.update({'pre_inds': pre_inds})
 			if self.opt.flip_test:

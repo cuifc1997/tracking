@@ -4,13 +4,14 @@ from __future__ import print_function
 
 import time
 import torch
+import torch.nn as nn
 import numpy as np
 from progress.bar import Bar
 
 from model.data_parallel import DataParallel
 from utils.utils import AverageMeter
 
-from model.losses import FastFocalLoss, RegWeightedL1Loss
+from model.losses import FastFocalLoss, RegWeightedL1Loss, IDloss
 from model.losses import BinRotLoss, WeightedBCELoss
 from model.decode import generic_decode
 from model.utils import _sigmoid, flip_tensor, flip_lr_off, flip_lr
@@ -22,11 +23,14 @@ class GenericLoss(torch.nn.Module):
 		super(GenericLoss, self).__init__()
 		self.crit = FastFocalLoss(opt=opt)
 		self.crit_reg = RegWeightedL1Loss()
+		self.crit_reid = IDloss()
 		if 'rot' in opt.heads:
 			self.crit_rot = BinRotLoss()
 		if 'nuscenes_att' in opt.heads:
 			self.crit_nuscenes_att = WeightedBCELoss()
 		self.opt = opt
+		self.s_det = nn.Parameter(-1.85 * torch.ones(1))
+		self.s_id = nn.Parameter(-1.05 * torch.ones(1))
 
 	def _sigmoid_output(self, output):
 		if 'hm' in output:
@@ -40,7 +44,7 @@ class GenericLoss(torch.nn.Module):
 	def forward(self, outputs, batch):
 		opt = self.opt
 		losses = {head: 0 for head in opt.heads}
-
+		losses['reid'] = 0
 		for s in range(opt.num_stacks):
 			output = outputs[s]
 			output = self._sigmoid_output(output)
@@ -49,6 +53,28 @@ class GenericLoss(torch.nn.Module):
 				losses['hm'] += self.crit(
 					output['hm'], batch['hm'], batch['ind'],
 					batch['mask'], batch['cat']) / opt.num_stacks
+			# change to adjust weight of new and old detection
+			# if 'hm' in output:
+			# 	if 'tracking' in output:
+			# 		new_mask = batch['mask'] * batch['tracking_mask'][:, 0]
+			# 		old_mask = batch['mask'] * (1-batch['tracking_mask'][:, 0])
+			# 		losses['hm'] += self.crit(output['hm'], batch['hm'], batch['ind'], new_mask, batch['cat']) / opt.num_stacks
+			# 		losses['hm'] += self.crit(output['hm'], batch['hm'], batch['ind'], old_mask, batch['cat']) / opt.num_stacks
+			# 	else:
+			# 		losses['hm'] += self.crit(
+			# 			output['hm'], batch['hm'], batch['ind'],
+			# 			batch['mask'], batch['cat']) / opt.num_stacks
+
+			# crit_reid version 1
+			if 'cur_reid' in output:
+				losses['reid'] += self.crit_reid(output['cur_reid'], output['pre_reid'], batch['ind'],
+													  batch['ind_pre'], batch['tracking_mask'])
+
+			# crit_reid version 2
+			# if 'cur_reid' in output:
+			# 	losses['reid'] += self.crit_reid(output['cur_reid'], output['pre_reid'], batch['cts_int'],
+			# 										  output['tracking'], batch['tracking_mask'], batch['pre_cts_int'], opt)
+
 
 			regression_heads = [
 				'reg', 'wh', 'tracking', 'ltrb', 'ltrb_amodal', 'hps',
@@ -82,7 +108,9 @@ class GenericLoss(torch.nn.Module):
 		losses['tot'] = 0
 		for head in opt.heads:
 			losses['tot'] += opt.weights[head] * losses[head]
-
+		# losses['tot'] += losses['reid']
+		losses['tot'] = torch.exp(-self.s_det) * losses['tot'] + torch.exp(-self.s_id) * losses['reid'] + (
+					self.s_det + self.s_id)
 		return losses['tot'], losses
 
 
@@ -95,7 +123,8 @@ class ModleWithLoss(torch.nn.Module):
 	def forward(self, batch):
 		pre_img = batch['pre_img'] if 'pre_img' in batch else None
 		pre_hm = batch['pre_hm'] if 'pre_hm' in batch else None
-		outputs = self.model(batch['image'], pre_img, pre_hm)
+		input_pre_ind = batch['input_pre_ind'] if 'input_pre_ind' in batch else None
+		outputs = self.model(batch['image'], pre_img, pre_hm, input_pre_ind)
 		loss, loss_stats = self.loss(outputs, batch)
 		return outputs[-1], loss, loss_stats
 
@@ -135,6 +164,7 @@ class Trainer(object):
 		data_time, batch_time = AverageMeter(), AverageMeter()
 		avg_loss_stats = {l: AverageMeter() for l in self.loss_stats \
 		                  if l == 'tot' or opt.weights[l] > 0}
+		avg_loss_stats['reid'] = AverageMeter()
 		num_iters = len(data_loader) if opt.num_iters < 0 else opt.num_iters
 		bar = Bar('{}/{}'.format(opt.task, opt.exp_id), max=num_iters)
 		end = time.time()
@@ -162,8 +192,8 @@ class Trainer(object):
 				avg_loss_stats[l].update(
 					loss_stats[l].mean().item(), batch['image'].size(0))
 				Bar.suffix = Bar.suffix + '|{} {:.4f} '.format(l, avg_loss_stats[l].avg)
-			Bar.suffix = Bar.suffix + '|Data {dt.val:.3f}s({dt.avg:.3f}s) ' \
-			                          '|Net {bt.avg:.3f}s'.format(dt=data_time, bt=batch_time)
+			# Bar.suffix = Bar.suffix + '|Data {dt.val:.3f}s({dt.avg:.3f}s) ' \
+			#                           '|Net {bt.avg:.3f}s'.format(dt=data_time, bt=batch_time)
 			if opt.print_iter > 0: # If not using progress bar
 				if iter_id % opt.print_iter == 0:
 					print('{}/{}| {}'.format(opt.task, opt.exp_id, Bar.suffix))
